@@ -1,5 +1,5 @@
 """
-Antigravity Conversation Fix  (v1.03)
+Antigravity Conversation Fix  (v1.04)
 =============================
 Rebuilds the Antigravity conversation index so all your chat history
 appears correctly — sorted by date (newest first) with proper titles.
@@ -154,12 +154,22 @@ def encode_string_field(field_number, string_value):
 
 # ─── Workspace Helpers ───────────────────────────────────────────────────────
 
+def _is_remote_uri(path_or_uri):
+    """Check if a string is already a remote/absolute URI (not a local path)."""
+    return path_or_uri.startswith("vscode-remote://") or path_or_uri.startswith("file:///")
+
+
 def path_to_workspace_uri(folder_path):
     """
     Convert a local folder path to a file:/// URI matching Antigravity's format.
+    Passes through remote URIs (vscode-remote://, file:///) unchanged.
     Handles spaces and special characters via URL-encoding.
     Example: D:\\Repos\\My Project  →  file:///d%3A/Repos/My%20Project
     """
+    # Pass through URIs that are already in the correct format
+    if _is_remote_uri(folder_path):
+        return folder_path
+
     p = folder_path.replace("\\", "/")
     # Lowercase drive letter + URL-encode the colon
     if len(p) >= 2 and p[1] == ":":
@@ -199,8 +209,8 @@ def build_workspace_field(folder_path):
 def extract_workspace_hint(inner_blob):
     """
     Try to extract a workspace URI from the protobuf inner blob.
-    Scans length-delimited fields for strings matching file:/// patterns.
-    Returns the URI string if found, or None.
+    Scans length-delimited fields for strings matching file:/// or
+    vscode-remote:// patterns. Returns the URI string if found, or None.
     """
     if not inner_blob:
         return None
@@ -217,7 +227,7 @@ def extract_workspace_hint(inner_blob):
                 if field_num > 1:
                     try:
                         text = content.decode("utf-8", errors="strict")
-                        if "file:///" in text:
+                        if "file:///" in text or "vscode-remote://" in text:
                             return text
                     except Exception:
                         pass
@@ -236,18 +246,20 @@ def extract_workspace_hint(inner_blob):
 
 def infer_workspace_from_brain(conversation_id):
     """
-    Scan brain .md files for file:/// paths and infer the workspace
-    from the most common project folder prefix.
-    Returns a filesystem path string or None.
+    Scan brain .md files for file:/// and vscode-remote:// paths and infer
+    the workspace from the most common project folder prefix.
+    Returns a filesystem path string, a remote URI string, or None.
     """
     brain_path = os.path.join(BRAIN_DIR, conversation_id)
     if not os.path.isdir(brain_path):
         return None
 
+    # Two separate patterns: local file:/// and remote vscode-remote://
     if _SYSTEM == "Windows":
-        path_pattern = re.compile(r"file:///([A-Za-z](?:%3A|:)/[^)\s\"'\]>]+)")
+        local_pattern = re.compile(r"file:///([A-Za-z](?:%3A|:)/[^)\s\"'\]>]+)")
     else:
-        path_pattern = re.compile(r"file:///([^)\s\"'\]>]+)")
+        local_pattern = re.compile(r"file:///([^)\s\"'\]>]+)")
+    remote_pattern = re.compile(r"(vscode-remote://[^)\s\"'\]>]+)")
 
     path_counts = {}
 
@@ -259,7 +271,14 @@ def infer_workspace_from_brain(conversation_id):
             try:
                 with open(filepath, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read(16384)
-                for match in path_pattern.finditer(content):
+
+                # Check for remote URIs first (return full URI, not path)
+                for match in remote_pattern.finditer(content):
+                    uri = match.group(1)
+                    path_counts[uri] = path_counts.get(uri, 0) + 1
+
+                # Check for local file:/// paths
+                for match in local_pattern.finditer(content):
                     raw = match.group(1)
                     # Normalize: decode %3A back to colon, decode %20 to space
                     raw = raw.replace("%3A", ":").replace("%3a", ":")
@@ -284,7 +303,9 @@ def infer_workspace_from_brain(conversation_id):
         return None
 
     best = max(path_counts, key=path_counts.get)
-    # Convert to OS-native path
+    # Remote URIs are returned as-is; local paths get OS-native separators
+    if best.startswith("vscode-remote://"):
+        return best
     return best.replace("/", os.sep)
 
 
@@ -332,6 +353,10 @@ def _prompt_valid_folder(prompt_text):
         if raw == "":
             return None
         folder = raw.strip('"').strip("'").rstrip("\\/")
+        # Accept remote URIs without filesystem validation
+        if _is_remote_uri(folder):
+            print(f"    + Mapped remote URI: {folder}")
+            return folder
         if os.path.isdir(folder):
             print(f"    + Mapped to {folder}")
             return folder
@@ -385,6 +410,11 @@ def interactive_workspace_assignment(unmapped_entries):
                 break
             # Normal path entry
             folder = raw.strip('"').strip("'").rstrip("\\/")
+            # Accept remote URIs without filesystem validation
+            if _is_remote_uri(folder):
+                print(f"    + Mapped remote URI: {folder}")
+                assignments[cid] = folder
+                break
             if os.path.isdir(folder):
                 print(f"    + Mapped to {folder}")
                 assignments[cid] = folder
@@ -573,7 +603,7 @@ def build_trajectory_entry(conversation_id, title, existing_inner_data=None,
 def main():
     print()
     print("=" * 62)
-    print("   Antigravity Conversation Fix  v1.03")
+    print("   Antigravity Conversation Fix  v1.04")
     print("   Rebuilds your conversation index — sorted by date")
     print("=" * 62)
     print()
